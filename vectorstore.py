@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Cache for storing generated questions
 question_cache = {}
 
-async def generate_questions_async(text, openai_client: AsyncAzureOpenAI, deployment_name: str = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-deployment"), max_retries=4):
+async def generate_questions_async(text, openai_client: AsyncAzureOpenAI, deployment_name: str = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4"), max_retries=4):
     """Generate questions for a given text using Azure OpenAI with retry logic."""
     cache_key = hashlib.md5(text.encode('utf-8')).hexdigest()
     if cache_key in question_cache:
