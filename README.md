@@ -44,9 +44,13 @@ Copy documents to directory:
 
 # Usage
 
-API: http://localhost:8000
-
 Frontend (OpenWebUI): http://localhost:3000
+
+In OpenWebUI go to ->settings ->connections and add a new connection http://localhost:8000, leave APY Key empty
+
+In the chat choose model "custom-rag"
+
+API: http://localhost:8000 
 
 API Endpoints
 
