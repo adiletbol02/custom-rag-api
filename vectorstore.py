@@ -29,7 +29,7 @@ async def generate_questions_async(text, openai_client: AsyncAzureOpenAI, deploy
         logger.debug("Returning cached questions")
         return question_cache[cache_key]
 
-    prompt = f"Сгенерируй 10 вопросов на которые отвечает следующий текст:\n\n{text}\n\n Определи язык и отвечай только на этом языке. Прономеруй все вопросы (например, 1. Вопрос):"
+    prompt = f"Сгенерируй 5 вопросов на которые отвечает следующий текст:\n\n{text}\n\n Определи язык и отвечай только на этом языке. Прономеруй все вопросы (например, 1. Вопрос):"
     messages = [
         {"role": "system", "content": "You are a helpful assistant that generates questions based on provided text. Respond in the same language as the input text."},
         {"role": "user", "content": prompt}
