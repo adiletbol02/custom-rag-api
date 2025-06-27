@@ -203,10 +203,10 @@ async def chat_completions_v1(request: ChatCompletionRequest, vectorstore, embed
         answer = cached_answer
     else:
         # Check if query is for generating follow-up questions
-        is_followup_query = query.startswith('### Task:\nSuggest')
-        is_gen_title = query.startswith('### Task:\nGenerate')
+        is_followup_query = query.startswith('### Task:\nSuggest' or '### Task:Suggest' or '### Task: Suggest' or '### Task: \nSuggest')
+        is_gen_title = query.startswith('### Task:\nGenerate' or '### Task:Generate' or '### Task: Generate' or '### Task: \nGenerate')
         messages = construct_prompt(query, vectorstore, request.custom_instructions, chat_history, embeddings)
-        answer = await generate_response(messages, os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-deployment"), openai_client)
+        answer = await generate_response(messages, os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4"), openai_client)
         
         # Only cache if not a follow-up question generation query
         if not is_followup_query or is_gen_title:
