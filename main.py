@@ -3,7 +3,7 @@ import os
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import google.generativeai as genai
+from openai import AsyncAzureOpenAI  # Import Azure OpenAI client
 from redis import Redis
 from redisvl.schema import IndexSchema
 from redisvl.index import SearchIndex
@@ -19,8 +19,8 @@ allowed_origins = [origin.strip() for origin in CORS_ORIGINS.split(',')]
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Custom RAG API with Gemini",
-    description="An API providing chat completions powered by a RAG pipeline using Gemini and Redis.",
+    title="Custom RAG API with Azure OpenAI",
+    description="An API providing chat completions powered by a RAG pipeline using Azure OpenAI and Redis.",
     version="1.0.0"
 )
 
@@ -38,20 +38,27 @@ logger.info(f"CORS enabled for the following origins: {allowed_origins}")
 async def startup_event():
     """
     Asynchronous tasks to be run when the application starts.
-    Initializes the Gemini API, embeddings, vector store, and Redis cache index.
+    Initializes the Azure OpenAI client, embeddings, vector store, and Redis cache index.
     """
     logger.info("Application startup...")
 
-    # 1. Initialize Gemini API
+    # 1. Initialize Azure OpenAI client
     try:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            logger.error("GEMINI_API_KEY environment variable not set.")
-            raise ValueError("Failed to configure Gemini API: API key is missing.")
-        genai.configure(api_key=api_key)
-        logger.info("Gemini API configured successfully.")
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+        if not api_key or not endpoint:
+            logger.error("Azure OpenAI credentials are missing.")
+            raise ValueError("Failed to configure Azure OpenAI: credentials are missing.")
+        app.state.openai_client = AsyncAzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version
+        )
+        logger.info("Azure OpenAI client initialized successfully.")
     except Exception as e:
-        logger.error(f"Gemini API configuration error: {e}", exc_info=True)
+        logger.error(f"Azure OpenAI configuration error: {e}", exc_info=True)
+        raise
 
     # 2. Initialize embeddings
     try:
@@ -86,7 +93,7 @@ async def startup_event():
                     "type": "vector",
                     "attrs": {
                         "algorithm": "hnsw",
-                        "dims": len(app.state.embeddings.embed_query("test query")),  # Dynamic dimension
+                        "dims": len(app.state.embeddings.embed_query("test query")),
                         "distance_metric": "cosine",
                         "datatype": "float32"
                     }
@@ -111,7 +118,7 @@ async def read_root():
     """
     Root endpoint providing a simple health check.
     """
-    return {"status": "ok", "message": "Welcome to the Custom RAG API"}
+    return {"status": "ok", "message": "Welcome to the Custom RAG API with Azure OpenAI"}
 
 # Run the application using Uvicorn
 if __name__ == "__main__":

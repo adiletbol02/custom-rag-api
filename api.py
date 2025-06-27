@@ -8,7 +8,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator, List, Optional
-import google.generativeai as genai
+from openai import AsyncAzureOpenAI  # Import Azure OpenAI client
 from config import DEFAULT_INSTRUCTIONS
 from models import ChatCompletionRequest, ChatCompletionResponse, Model, Message, Choice, Usage, StreamChunk, StreamChoice
 from vectorstore import update_vectorstore
@@ -27,7 +27,7 @@ async def try_get_from_cache(query: str, embeddings, cache_index):
     query_embedding = query_embedding / np.linalg.norm(query_embedding)
     logger.info(f"Query: '{query}', Embedding norm: {np.linalg.norm(query_embedding)}")
     vector_query = VectorQuery(
-        vector=query_embedding.tolist(),  # Convert to list for Redis
+        vector=query_embedding.tolist(),
         vector_field_name="query_embedding",
         num_results=1,
         return_fields=["response", "query_text"],
@@ -49,34 +49,38 @@ async def try_get_from_cache(query: str, embeddings, cache_index):
         logger.info("No cache results found")
     return None
 
-async def generate_response(prompt: str, model_name: str):
-    """Generate a response using the Gemini model with retry logic for rate limits."""
-    try:
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    except Exception as e:
-        if "rate limit" in str(e).lower():
-            logger.warning("Rate limit hit, retrying after 60 seconds")
-            await asyncio.sleep(60)
-            try:
-                model = genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                return response.text.strip()
-            except Exception as e:
-                logger.error(f"Gemini API error after retry: {e}")
-                raise HTTPException(status_code=500, detail=f"Gemini API error: {e}")
-        else:
-            logger.error(f"Gemini API error: {e}")
-            raise HTTPException(status_code=500, detail=f"Gemini API error: {e}")
+async def generate_response(messages: List[dict], deployment_name: str, openai_client: AsyncAzureOpenAI):
+    """Generate a response using the Azure OpenAI model with retry logic for rate limits."""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = await openai_client.chat.completions.create(
+                model=deployment_name,
+                messages=messages
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            if "rate limit" in str(e).lower():
+                logger.warning(f"Rate limit hit, retrying after 60 seconds (attempt {attempt+1}/{max_retries})")
+                await asyncio.sleep(60)
+            else:
+                logger.error(f"Azure OpenAI API error: {e}")
+                raise HTTPException(status_code=500, detail=f"Azure OpenAI API error: {e}")
+    logger.error(f"Failed to generate response after {max_retries} attempts")
+    raise HTTPException(status_code=429, detail="Rate limit exceeded after retries")
 
 def construct_prompt(query: str, vectorstore, custom_instructions: Optional[str], chat_history: Optional[List[Message]], embeddings):
-    """Construct the prompt for the Gemini model, including context and history."""
+    """Construct a list of messages for the Azure OpenAI model, including context and history."""
     instructions = custom_instructions or DEFAULT_INSTRUCTIONS
-    history_text = "\n".join([f"{msg.role.capitalize()}: {msg.content}" for msg in chat_history]) if chat_history else ""
-    if vectorstore is None:
-        prompt = f"Instructions:\n{instructions}\n\nChat History:\n{history_text}\n\nQuery:\n{query}\n\nAnswer:"
-    else:
+    messages = [{"role": "system", "content": instructions}]
+
+    # Add chat history
+    if chat_history:
+        for msg in chat_history:
+            messages.append({"role": msg.role, "content": msg.content})
+
+    # Add context from vectorstore if available
+    if vectorstore:
         try:
             k = int(os.getenv("SIMILARITY_K", 5))
             content_weight = float(os.getenv("CONTENT_WEIGHT", 0.7))
@@ -143,11 +147,14 @@ def construct_prompt(query: str, vectorstore, custom_instructions: Optional[str]
             context = ""
             for doc in docs:
                 context += f"Chunk from {doc.metadata.get('source', 'unknown')} (Pages {doc.metadata.get('page_numbers', 'unknown')}):\n{doc.page_content}\n\n"
-            prompt = f"Instructions:\n{instructions}\n\nContext:\n{context}\n\nChat History:\n{history_text}\n\nQuery:\n{query}\n\nAnswer:"
+            messages.append({"role": "user", "content": f"Context:\n{context}\nQuery:\n{query}"})
         except Exception as e:
             logger.error(f"Error constructing prompt: {e}")
-            prompt = f"Instructions:\n{instructions}\n\nChat History:\n{history_text}\n\nQuery:\n{query}\n\nAnswer:"
-    return prompt
+            messages.append({"role": "user", "content": query})
+    else:
+        messages.append({"role": "user", "content": query})
+
+    return messages
 
 async def stream_response(answer: str, model_name: str) -> AsyncGenerator[str, None]:
     """Stream the response in chunks for the client."""
@@ -180,7 +187,7 @@ async def stream_response(answer: str, model_name: str) -> AsyncGenerator[str, N
     yield f"data: {json.dumps(final_chunk.dict())}\n\n"
     yield "data: [DONE]\n\n"
 
-async def chat_completions_v1(request: ChatCompletionRequest, vectorstore, embeddings, cache_index):
+async def chat_completions_v1(request: ChatCompletionRequest, vectorstore, embeddings, cache_index, openai_client: AsyncAzureOpenAI):
     """Handle chat completion requests with Redis semantic caching."""
     if not request.messages:
         raise HTTPException(status_code=400, detail="No messages provided")
@@ -198,8 +205,8 @@ async def chat_completions_v1(request: ChatCompletionRequest, vectorstore, embed
         # Check if query is for generating follow-up questions
         is_followup_query = query.startswith('### Task:\nSuggest')
         is_gen_title = query.startswith('### Task:\nGenerate')
-        prompt = construct_prompt(query, vectorstore, request.custom_instructions, chat_history, embeddings)
-        answer = await generate_response(prompt, "gemini-2.0-flash")
+        messages = construct_prompt(query, vectorstore, request.custom_instructions, chat_history, embeddings)
+        answer = await generate_response(messages, os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-deployment"), openai_client)
         
         # Only cache if not a follow-up question generation query
         if not is_followup_query or is_gen_title:
@@ -208,7 +215,7 @@ async def chat_completions_v1(request: ChatCompletionRequest, vectorstore, embed
             cache_data = {
                 "query_text": query,
                 "response": answer,
-                "query_embedding": query_embedding.tolist()  # Convert to list for JSON serialization
+                "query_embedding": query_embedding.tolist()
             }
             try:
                 cache_index.load([cache_data])
@@ -225,8 +232,9 @@ async def chat_completions_v1(request: ChatCompletionRequest, vectorstore, embed
         )
     else:
         # Reconstruct prompt for token calculation
-        prompt = construct_prompt(query, vectorstore, request.custom_instructions, chat_history, embeddings)
-        prompt_tokens = len(tokenizer.encode(prompt))
+        messages = construct_prompt(query, vectorstore, request.custom_instructions, chat_history, embeddings)
+        prompt_text = "".join([msg["content"] for msg in messages])
+        prompt_tokens = len(tokenizer.encode(prompt_text))
         completion_tokens = len(tokenizer.encode(answer))
         total_tokens = prompt_tokens + completion_tokens
         choice = Choice(index=0, message=Message(role="assistant", content=answer), finish_reason="stop")
@@ -248,7 +256,7 @@ def register_api_routes(app: FastAPI):
     """Register API routes with the FastAPI app."""
     @app.get("/v1/models")
     async def list_models_v1():
-        return {"data": [Model(id="custom-rag-gemini", created=int(time.time()), owned_by="user")]}
+        return {"data": [Model(id="custom-rag-azure", created=int(time.time()), owned_by="user")]}
 
     @app.get("/models")
     async def list_models():
@@ -256,11 +264,11 @@ def register_api_routes(app: FastAPI):
     
     @app.post("/chat/completions")
     async def chat_completions(request: ChatCompletionRequest):
-        return await chat_completions_v1(request, app.state.vectorstore, app.state.embeddings, app.state.cache_index)
+        return await chat_completions_v1(request, app.state.vectorstore, app.state.embeddings, app.state.cache_index, app.state.openai_client)
 
     @app.post("/v1/chat/completions")
     async def chat_completions_v1_endpoint(request: ChatCompletionRequest):
-        return await chat_completions_v1(request, app.state.vectorstore, app.state.embeddings, app.state.cache_index)
+        return await chat_completions_v1(request, app.state.vectorstore, app.state.embeddings, app.state.cache_index, app.state.openai_client)
 
     @app.post("/update_documents")
     async def update_documents(background_tasks: BackgroundTasks):

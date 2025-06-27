@@ -20,4 +20,5 @@ structlog==22.1.0
 tiktoken==0.8.0 
 redis==5.0.0
 redisvl
+openai
 

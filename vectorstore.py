@@ -8,7 +8,7 @@ import asyncio
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document
-import google.generativeai as genai
+from openai import AsyncAzureOpenAI  # Import Azure OpenAI client
 from document_processing import load_document
 import hashlib
 from redis import Redis
@@ -22,24 +22,33 @@ logger = logging.getLogger(__name__)
 # Cache for storing generated questions
 question_cache = {}
 
-async def generate_questions_async(text, model_name="gemini-2.0-flash", max_retries=4):
+async def generate_questions_async(text, openai_client: AsyncAzureOpenAI, deployment_name: str = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4-deployment"), max_retries=4):
+    """Generate questions for a given text using Azure OpenAI with retry logic."""
     cache_key = hashlib.md5(text.encode('utf-8')).hexdigest()
     if cache_key in question_cache:
         logger.debug("Returning cached questions")
         return question_cache[cache_key]
 
     prompt = f"Сгенерируй 10 вопросов на которые отвечает следующий текст:\n\n{text}\n\n Определи язык и отвечай только на этом языке. Прономеруй все вопросы (например, 1. Вопрос):"
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant that generates questions based on provided text. Respond in the same language as the input text."},
+        {"role": "user", "content": prompt}
+    ]
+
     for attempt in range(max_retries):
         try:
-            model = genai.GenerativeModel(model_name)
-            response = await asyncio.get_event_loop().run_in_executor(None, lambda: model.generate_content(prompt))
-            questions = response.text.split('\n')
+            response = await openai_client.chat.completions.create(
+                model=deployment_name,
+                messages=messages
+            )
+            questions = response.choices[0].message.content.strip().split('\n')
             questions = [q.strip() for q in questions if q.strip() and q[0].isdigit()]
             questions = questions[:10]
             question_cache[cache_key] = questions
+            logger.info(f"Generated {len(questions)} questions for text (cache key: {cache_key})")
             return questions
         except Exception as e:
-            if "429 you exceeded your current quota" in str(e).lower():
+            if "429" in str(e).lower() or "rate limit" in str(e).lower():
                 wait_time = 2 ** attempt * 15
                 logger.warning(f"Rate limit hit, waiting {wait_time} seconds before retry {attempt+1}/{max_retries}")
                 await asyncio.sleep(wait_time)
@@ -49,7 +58,8 @@ async def generate_questions_async(text, model_name="gemini-2.0-flash", max_retr
     logger.error(f"Failed to generate questions after {max_retries} attempts")
     return []
 
-async def load_and_process_documents(docs_dir, redis_client):
+async def load_and_process_documents(docs_dir, redis_client, openai_client: AsyncAzureOpenAI):
+    """Load and process documents, generating questions for new or modified files."""
     processed_files_key = "processed_files"
     processed_files = {}
     try:
@@ -74,7 +84,7 @@ async def load_and_process_documents(docs_dir, redis_client):
         os.makedirs(docs_dir)
         return [], processed_files
 
-    new_files = [file for file, mtime in current_files.items() if file not in processed_files or processed_files[file] < mtime]
+    new_files = [file for file, mtime in current_files.items() if file not in processed_files or processed_files[file]]
 
     if not new_files:
         logger.info("No new or modified files detected")
@@ -122,7 +132,7 @@ async def load_and_process_documents(docs_dir, redis_client):
         split.metadata['content_type'] = 'content'
         if len(split.page_content.strip()) > 100:
             logger.info(f"Generating questions for chunk {i+1}")
-            questions = await generate_questions_async(split.page_content)
+            questions = await generate_questions_async(split.page_content, openai_client)
             split.metadata['questions'] = '\n'.join(questions)
         else:
             logger.info(f"Skipping question generation for chunk {i+1} due to insufficient content")
@@ -154,7 +164,6 @@ async def load_and_process_documents(docs_dir, redis_client):
     for file in new_files:
         processed_files[file] = current_files[file]
 
-    # Save processed files metadata back to Redis
     try:
         redis_client.set(processed_files_key, json.dumps(processed_files))
         logger.info("Updated processed files metadata in Redis")
@@ -233,7 +242,21 @@ async def initialize_vectorstore():
         else:
             logger.info("Connected to existing Redis index")
 
-        enhanced_splits, processed_files = await load_and_process_documents(docs_dir, redis_client)
+        # Initialize Azure OpenAI client
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+        if not api_key or not endpoint:
+            logger.error("Azure OpenAI credentials are missing.")
+            raise ValueError("Failed to configure Azure OpenAI: credentials are missing.")
+        openai_client = AsyncAzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version
+        )
+        logger.info("Azure OpenAI client initialized for vectorstore")
+
+        enhanced_splits, processed_files = await load_and_process_documents(docs_dir, redis_client, openai_client)
         add_to_vectorstore(index, embeddings, enhanced_splits)
 
         test_text = "This is a test."
@@ -252,7 +275,16 @@ async def update_vectorstore(index):
     try:
         embeddings = HuggingFaceEmbeddings(model_name=os.getenv("EMBEDDING_MODEL"))
         redis_client = Redis.from_url(os.getenv("REDIS_URL", "redis://redis:6379"), decode_responses=True)
-        enhanced_splits, processed_files = await load_and_process_documents(docs_dir, redis_client)
+        # Reinitialize Azure OpenAI client for updates
+        api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        api_version = os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21")
+        openai_client = AsyncAzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=endpoint,
+            api_version=api_version
+        )
+        enhanced_splits, processed_files = await load_and_process_documents(docs_dir, redis_client, openai_client)
         add_to_vectorstore(index, embeddings, enhanced_splits)
     except Exception as e:
         logger.error(f"Vectorstore update error: {e}", exc_info=True)
