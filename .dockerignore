@@ -1,0 +1,85 @@
+# Python bytecode and cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+
+# Environment and secrets
+.env
+.env.*
+*.env
+*.pem
+*.key
+*.crt
+
+# Database and binary data
+*.sqlite3
+*.bin
+*.pickle
+
+# Project-specific data and processed files
+chroma_db_test/
+chroma_db/
+docs/
+docs2/
+documents/
+
+# Documentation and markdown
+/docs/
+*.md
+README*
+
+# IDE/editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build and distribution outputs
+dist/
+build/
+out/
+tmp/
+temp/
+*.tmp
+
+# Version control
+.git/
+.gitignore
+.svn/
+.hg/
+
+# Docker and compose files
+Dockerfile*
+docker-compose*
+
+# Local development
+.local/
+local/
+
+# Logs and debug
+*.log
+debug/
+
+# Node.js (not detected, but common in polyglot repos)
+node_modules/
+npm-debug.log
+yarn-debug.log
+
+# Go (not detected, but common in polyglot repos)
+/vendor/
+*.test
+.go-cache/
+
+test/
+tests/
+
+# Java (not detected, but common in polyglot repos)
+target/
+*.class
+.gradle/
+
+# Exclude document sources if not needed in build
+# /documents/*.docx

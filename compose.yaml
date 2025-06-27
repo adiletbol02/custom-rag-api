@@ -1,0 +1,48 @@
+services:
+  python-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: python-app
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ./.env
+    depends_on:
+      - redis
+    ports:
+      - "8000:8000"
+    volumes:
+      - app_data:/data
+    user: appuser:appuser
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - openwebui_data:/app/backend/data
+    environment:
+      - OPENAI_API_BASE_URL=http://python-app:8000/v1
+      - USER_AGENT=OpenWebUI/0.6.15
+      - CORS_ALLOW_ORIGIN=http://localhost:3000
+    depends_on:
+      - python-app # Ensure python-app starts first
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  redis:
+    image: redis/redis-stack:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+volumes:
+  app_data:
+  openwebui_data:
+  redis-data:
